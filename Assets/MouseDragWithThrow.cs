@@ -11,9 +11,26 @@ public class MouseDragWithThrowAndGravity : MonoBehaviour
 
     [Header("Upright Settings")]
     public string groundTag = "Ground";
-    public float uprightThreshold = 0.7f;
+    public float uprightThreshold = 0.98f;
     public float checkDelay = 2f;
-    public float uprightTorque = 20f;
+    public float uprightSpeed = 3f;
+
+    [Header("Wander Settings")]
+    public float walkSpeed = 2f;
+    public float maxX = 5f;
+    public float maxZ = 5f;
+    public float targetReachThreshold = 1f;
+    public float turnSpeed = 120f;
+    public float minAngleToMove = 5f;
+    public float minMoveDistance = 2f;
+
+    [Header("Hover Settings")]
+    public float hoverHeight = 0.1f;
+
+    [Header("Look Around Settings")]
+    public float lookAngle = 45f;
+    public float lookSpeed = 90f;
+    public float lookPauseTime = 0.5f;
 
     private Camera mainCamera;
     private Rigidbody rb;
@@ -21,16 +38,21 @@ public class MouseDragWithThrowAndGravity : MonoBehaviour
     private bool isDragging = false;
     private bool isGrounded = false;
     private bool isTryingToUpright = false;
+    private bool hasHoverStarted = false;
+    private bool isLookingAround = false;
 
     private float fallTimer;
     private Vector3 offset;
     private Vector3 currentVelocity;
 
+    private Vector3 walkTarget;
+    private bool hasWalkTarget = false;
+    private bool readyToWalk = true;
+
     void Start()
     {
         mainCamera = Camera.main;
         rb = GetComponent<Rigidbody>();
-
         rb.useGravity = true;
         rb.angularDrag = 0.05f;
     }
@@ -53,24 +75,52 @@ public class MouseDragWithThrowAndGravity : MonoBehaviour
 
             Vector3 targetPos = new Vector3(mouseWorldPos.x, mouseWorldPos.y, transform.position.z) + offset;
             currentVelocity = (targetPos - transform.position) * dragSpeed;
-
             rb.velocity = Vector3.ClampMagnitude(currentVelocity, maxVelocity);
         }
         else if (isTryingToUpright)
         {
-            // Continuously apply torque until upright
-            Quaternion uprightRotation = Quaternion.FromToRotation(transform.up, Vector3.up);
-            uprightRotation.ToAngleAxis(out float torqueAngle, out Vector3 torqueAxis);
-
-            rb.AddTorque(torqueAxis * (uprightTorque * Mathf.Deg2Rad * torqueAngle));
-
-            float uprightness = Vector3.Dot(transform.up, Vector3.up);
-            if (uprightness >= uprightThreshold)
-            {
-                isTryingToUpright = false;
-                rb.constraints = RigidbodyConstraints.None;
-            }
+            SmoothUprightRotation();
         }
+        else if (!isDragging && isGrounded && IsUpright())
+        {
+            if (!hasHoverStarted)
+            {
+                EnterHoverMode();
+            }
+
+            MaintainHoverHeight();
+            if (!isLookingAround)
+                HandleWalking();
+        }
+    }
+
+    void SmoothUprightRotation()
+    {
+        Quaternion currentRot = rb.rotation;
+        Quaternion targetRot = Quaternion.FromToRotation(transform.up, Vector3.up) * currentRot;
+        Quaternion newRotation = Quaternion.RotateTowards(currentRot, targetRot, uprightSpeed);
+        rb.MoveRotation(newRotation);
+
+        float uprightness = Vector3.Dot(transform.up, Vector3.up);
+        if (uprightness >= uprightThreshold)
+        {
+            isTryingToUpright = false;
+            rb.constraints = RigidbodyConstraints.None;
+            rb.angularVelocity = Vector3.zero;
+        }
+    }
+
+    void MaintainHoverHeight()
+    {
+        Vector3 pos = rb.position;
+        pos.y = hoverHeight;
+        rb.MovePosition(pos);
+    }
+
+    void EnterHoverMode()
+    {
+        hasHoverStarted = true;
+        rb.useGravity = false;
     }
 
     void HandleMouseInput()
@@ -83,17 +133,18 @@ public class MouseDragWithThrowAndGravity : MonoBehaviour
             if (Physics.Raycast(ray, out hit) && hit.collider.gameObject == gameObject)
             {
                 isDragging = true;
-
                 Vector3 screenPoint = mainCamera.WorldToScreenPoint(transform.position);
                 Vector3 worldPoint = mainCamera.ScreenToWorldPoint(new Vector3(
                     Input.mousePosition.x,
                     Input.mousePosition.y,
                     screenPoint.z));
-
                 offset = transform.position - new Vector3(worldPoint.x, worldPoint.y, transform.position.z);
-                rb.velocity = Vector3.zero;
 
+                rb.velocity = Vector3.zero;
                 CancelUpright();
+                hasWalkTarget = false;
+                hasHoverStarted = false;
+                rb.useGravity = true;
             }
         }
 
@@ -103,6 +154,10 @@ public class MouseDragWithThrowAndGravity : MonoBehaviour
 
             Vector3 throwVelocity = currentVelocity * throwMultiplier;
             rb.velocity = Vector3.ClampMagnitude(throwVelocity, maxVelocity);
+
+            hasWalkTarget = false;
+            readyToWalk = true;
+            isLookingAround = false;
         }
     }
 
@@ -128,8 +183,6 @@ public class MouseDragWithThrowAndGravity : MonoBehaviour
     void TryUpright()
     {
         isTryingToUpright = true;
-
-        // Freeze position so it doesn't slide while trying to upright
         rb.constraints = RigidbodyConstraints.FreezePositionX | RigidbodyConstraints.FreezePositionZ;
     }
 
@@ -137,6 +190,116 @@ public class MouseDragWithThrowAndGravity : MonoBehaviour
     {
         isTryingToUpright = false;
         rb.constraints = RigidbodyConstraints.None;
+    }
+
+    void HandleWalking()
+    {
+        Vector3 flatPos = new Vector3(transform.position.x, 0, transform.position.z);
+
+        if (hasWalkTarget)
+        {
+            Vector3 flatTarget = new Vector3(walkTarget.x, 0, walkTarget.z);
+            float distanceToTarget = Vector3.Distance(flatPos, flatTarget);
+
+            if (distanceToTarget < targetReachThreshold && !isLookingAround)
+            {
+                isLookingAround = true;
+                readyToWalk = false;
+                StartCoroutine(LookAroundBeforeWalking());
+                return;
+            }
+
+            if (!readyToWalk) return;
+
+            Vector3 direction = (flatTarget - flatPos).normalized;
+
+            if (direction.sqrMagnitude > 0.01f)
+            {
+                Quaternion targetRot = Quaternion.LookRotation(-direction);
+                rb.MoveRotation(Quaternion.RotateTowards(rb.rotation, targetRot, turnSpeed * Time.fixedDeltaTime));
+            }
+
+            float angle = Vector3.Angle(transform.forward, -direction);
+
+            if (angle < minAngleToMove)
+            {
+                Vector3 desiredVelocity = direction * walkSpeed;
+                rb.velocity = new Vector3(desiredVelocity.x, rb.velocity.y, desiredVelocity.z);
+            }
+            else
+            {
+                rb.velocity = new Vector3(0, rb.velocity.y, 0);
+            }
+        }
+        else if (!isLookingAround && readyToWalk)
+        {
+            StartCoroutine(LookAroundBeforeWalking());
+            isLookingAround = true;
+            readyToWalk = false;
+        }
+    }
+
+
+    IEnumerator LookAroundBeforeWalking()
+    {
+        isLookingAround = true;
+        rb.velocity = Vector3.zero;
+
+        yield return new WaitForSeconds(lookPauseTime);
+
+        float totalRotation = 0f;
+        while (totalRotation < lookAngle)
+        {
+            float step = lookSpeed * Time.deltaTime;
+            rb.MoveRotation(rb.rotation * Quaternion.Euler(0, -step, 0));
+            totalRotation += step;
+            yield return null;
+        }
+
+        yield return new WaitForSeconds(lookPauseTime);
+
+        totalRotation = 0f;
+        while (totalRotation < lookAngle * 2)
+        {
+            float step = lookSpeed * Time.deltaTime;
+            rb.MoveRotation(rb.rotation * Quaternion.Euler(0, step, 0));
+            totalRotation += step;
+            yield return null;
+        }
+
+        yield return new WaitForSeconds(lookPauseTime);
+
+        totalRotation = 0f;
+        while (totalRotation < lookAngle)
+        {
+            float step = lookSpeed * Time.deltaTime;
+            rb.MoveRotation(rb.rotation * Quaternion.Euler(0, -step, 0));
+            totalRotation += step;
+            yield return null;
+        }
+
+        yield return new WaitForSeconds(lookPauseTime);
+
+        Vector3 flatPos = new Vector3(transform.position.x, 0, transform.position.z);
+        Vector3 newTarget;
+        do
+        {
+            newTarget = new Vector3(
+                Random.Range(-maxX, maxX),
+                hoverHeight,
+                Random.Range(-maxZ, maxZ)
+            );
+        } while (Vector3.Distance(flatPos, new Vector3(newTarget.x, 0, newTarget.z)) < minMoveDistance);
+
+        walkTarget = newTarget;
+        hasWalkTarget = true;
+        readyToWalk = true;
+        isLookingAround = false;
+    }
+
+    bool IsUpright()
+    {
+        return Vector3.Dot(transform.up, Vector3.up) >= uprightThreshold;
     }
 
     private void OnCollisionEnter(Collision collision)
